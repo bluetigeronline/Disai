@@ -1,0 +1,408 @@
+// package.json
+{
+  "name": "dis-hekimi-mcp-server",
+  "version": "1.0.0",
+  "description": "MCP Server for Dental Appointment System",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@anthropic/mcp-server": "^0.1.0",
+    "googleapis": "^128.0.0",
+    "twilio": "^4.19.0",
+    "express": "^4.18.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
+
+// server.js
+import { Server } from '@anthropic/mcp-server';
+import { StdioTransport } from '@anthropic/mcp-server/stdio';
+import { google } from 'googleapis';
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+// Express server for health checks
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+app.get('/health', (req, res) => {
+  res.json({ status: 'healthy', timestamp: new Date().toISOString() });
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Health server running on port ${PORT}`);
+});
+
+// MCP Server Setup
+const server = new Server(
+  {
+    name: 'dis-hekimi-randevu-mcp',
+    version: '1.0.0'
+  },
+  {
+    capabilities: {
+      tools: {}
+    }
+  }
+);
+
+// Google Calendar Setup
+const calendar = google.calendar('v3');
+const sheets = google.sheets('v4');
+
+// Google Auth
+const auth = new google.auth.GoogleAuth({
+  credentials: {
+    type: 'service_account',
+    project_id: process.env.GOOGLE_PROJECT_ID,
+    private_key_id: process.env.GOOGLE_PRIVATE_KEY_ID,
+    private_key: process.env.GOOGLE_PRIVATE_KEY?.replace(/\\n/g, '\n'),
+    client_email: process.env.GOOGLE_CLIENT_EMAIL,
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    auth_uri: 'https://accounts.google.com/o/oauth2/auth',
+    token_uri: 'https://oauth2.googleapis.com/token',
+  },
+  scopes: [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/spreadsheets'
+  ]
+});
+
+// Twilio Setup
+import twilio from 'twilio';
+const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
+// Tools Definition
+const tools = [
+  {
+    name: 'check_calendar_availability',
+    description: 'Doktor takviminde belirli tarih ve saatte müsaitlik kontrol eder',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: { 
+          type: 'string', 
+          format: 'date',
+          description: 'YYYY-MM-DD formatında tarih'
+        },
+        time: { 
+          type: 'string', 
+          pattern: '^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$',
+          description: 'HH:MM formatında saat'
+        },
+        duration: { 
+          type: 'number', 
+          default: 30,
+          description: 'Randevu süresi (dakika)'
+        }
+      },
+      required: ['date', 'time']
+    }
+  },
+  {
+    name: 'create_appointment',
+    description: 'Google Calendar\'da randevu oluşturur ve Sheets\'e kaydeder',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        patientName: { type: 'string', description: 'Hasta adı soyadı' },
+        patientPhone: { type: 'string', description: 'Hasta telefon numarası' },
+        patientEmail: { type: 'string', description: 'Hasta email adresi' },
+        appointmentDate: { type: 'string', format: 'date' },
+        appointmentTime: { type: 'string', pattern: '^([0-1]?[0-9]|2[0-3]):[0-5][0-9]$' },
+        treatmentType: { type: 'string', description: 'Tedavi türü' },
+        notes: { type: 'string', description: 'Ek notlar' }
+      },
+      required: ['patientName', 'patientPhone', 'appointmentDate', 'appointmentTime']
+    }
+  },
+  {
+    name: 'send_whatsapp_confirmation',
+    description: 'WhatsApp ile randevu onayı gönderir',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string', description: 'WhatsApp telefon numarası (+90 ile başlayarak)' },
+        patientName: { type: 'string', description: 'Hasta adı' },
+        appointmentDate: { type: 'string', description: 'Randevu tarihi' },
+        appointmentTime: { type: 'string', description: 'Randevu saati' },
+        clinicName: { type: 'string', default: 'Diş Kliniği' },
+        doctorName: { type: 'string', default: 'Dr.' }
+      },
+      required: ['phone', 'patientName', 'appointmentDate', 'appointmentTime']
+    }
+  },
+  {
+    name: 'get_available_slots',
+    description: 'Belirli bir tarih için tüm müsait saatleri getirir',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        date: { type: 'string', format: 'date' },
+        workingHours: {
+          type: 'object',
+          properties: {
+            start: { type: 'string', default: '09:00' },
+            end: { type: 'string', default: '18:00' }
+          }
+        }
+      },
+      required: ['date']
+    }
+  }
+];
+
+// List tools handler
+server.setRequestHandler('tools/list', async () => {
+  return { tools };
+});
+
+// Execute tools handler
+server.setRequestHandler('tools/call', async (request) => {
+  const { name, arguments: args } = request.params;
+  
+  try {
+    switch (name) {
+      case 'check_calendar_availability':
+        return await checkCalendarAvailability(args);
+      
+      case 'create_appointment':
+        return await createAppointment(args);
+      
+      case 'send_whatsapp_confirmation':
+        return await sendWhatsAppConfirmation(args);
+      
+      case 'get_available_slots':
+        return await getAvailableSlots(args);
+      
+      default:
+        throw new Error(`Unknown tool: ${name}`);
+    }
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: `Error: ${error.message}`
+      }],
+      isError: true
+    };
+  }
+});
+
+// Tool Functions
+async function checkCalendarAvailability({ date, time, duration = 30 }) {
+  const authClient = await auth.getClient();
+  
+  const startDateTime = new Date(`${date}T${time}:00`);
+  const endDateTime = new Date(startDateTime.getTime() + (duration * 60000));
+  
+  const response = await calendar.events.list({
+    auth: authClient,
+    calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+    timeMin: startDateTime.toISOString(),
+    timeMax: endDateTime.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+  
+  const isAvailable = response.data.items.length === 0;
+  
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        available: isAvailable,
+        date: date,
+        time: time,
+        duration: duration,
+        conflicts: response.data.items.length
+      })
+    }]
+  };
+}
+
+async function createAppointment(args) {
+  const authClient = await auth.getClient();
+  
+  const { patientName, patientPhone, patientEmail, appointmentDate, appointmentTime, treatmentType, notes } = args;
+  
+  // Create calendar event
+  const startDateTime = new Date(`${appointmentDate}T${appointmentTime}:00`);
+  const endDateTime = new Date(startDateTime.getTime() + (30 * 60000)); // 30 min default
+  
+  const event = {
+    summary: `${treatmentType || 'Diş Muayenesi'} - ${patientName}`,
+    description: `Hasta: ${patientName}\nTelefon: ${patientPhone}\nEmail: ${patientEmail || ''}\nNotlar: ${notes || ''}`,
+    start: {
+      dateTime: startDateTime.toISOString(),
+      timeZone: 'Europe/Istanbul',
+    },
+    end: {
+      dateTime: endDateTime.toISOString(),
+      timeZone: 'Europe/Istanbul',
+    },
+    attendees: patientEmail ? [{ email: patientEmail }] : [],
+  };
+  
+  const calendarResponse = await calendar.events.insert({
+    auth: authClient,
+    calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+    resource: event,
+  });
+  
+  // Save to Google Sheets
+  const sheetValues = [[
+    new Date().toISOString(),
+    patientName,
+    patientPhone,
+    patientEmail || '',
+    appointmentDate,
+    appointmentTime,
+    treatmentType || 'Muayene',
+    notes || '',
+    'Onaylandı',
+    calendarResponse.data.id
+  ]];
+  
+  await sheets.spreadsheets.values.append({
+    auth: authClient,
+    spreadsheetId: process.env.GOOGLE_SHEET_ID,
+    range: 'Randevular!A:J',
+    valueInputOption: 'USER_ENTERED',
+    resource: {
+      values: sheetValues,
+    },
+  });
+  
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        success: true,
+        appointmentId: calendarResponse.data.id,
+        message: 'Randevu başarıyla oluşturuldu',
+        details: {
+          patient: patientName,
+          date: appointmentDate,
+          time: appointmentTime,
+          treatment: treatmentType || 'Muayene'
+        }
+      })
+    }]
+  };
+}
+
+async function sendWhatsAppConfirmation({ phone, patientName, appointmentDate, appointmentTime, clinicName = 'Diş Kliniği', doctorName = 'Dr.' }) {
+  const message = `Merhaba ${patientName},
+
+${clinicName} randevunuz onaylanmıştır:
+📅 Tarih: ${appointmentDate}
+🕒 Saat: ${appointmentTime}
+👨‍⚕️ ${doctorName}
+
+Randevunuz için teşekkür ederiz. Herhangi bir sorunuz varsa bizi arayabilirsiniz.
+
+${clinicName}`;
+
+  try {
+    const twilioResponse = await twilioClient.messages.create({
+      body: message,
+      from: process.env.TWILIO_WHATSAPP_NUMBER,
+      to: `whatsapp:${phone}`
+    });
+    
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: true,
+          messageSid: twilioResponse.sid,
+          message: 'WhatsApp onayı gönderildi',
+          to: phone
+        })
+      }]
+    };
+  } catch (error) {
+    return {
+      content: [{
+        type: 'text',
+        text: JSON.stringify({
+          success: false,
+          error: error.message,
+          message: 'WhatsApp gönderiminde hata'
+        })
+      }]
+    };
+  }
+}
+
+async function getAvailableSlots({ date, workingHours = { start: '09:00', end: '18:00' } }) {
+  const authClient = await auth.getClient();
+  
+  const startOfDay = new Date(`${date}T${workingHours.start}:00`);
+  const endOfDay = new Date(`${date}T${workingHours.end}:00`);
+  
+  // Get existing events
+  const response = await calendar.events.list({
+    auth: authClient,
+    calendarId: process.env.GOOGLE_CALENDAR_ID || 'primary',
+    timeMin: startOfDay.toISOString(),
+    timeMax: endOfDay.toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+  
+  // Generate 30-minute slots
+  const slots = [];
+  let currentTime = new Date(startOfDay);
+  
+  while (currentTime < endOfDay) {
+    const slotEnd = new Date(currentTime.getTime() + (30 * 60000));
+    
+    // Check if slot conflicts with existing events
+    const hasConflict = response.data.items.some(event => {
+      const eventStart = new Date(event.start.dateTime);
+      const eventEnd = new Date(event.end.dateTime);
+      
+      return (currentTime < eventEnd && slotEnd > eventStart);
+    });
+    
+    if (!hasConflict) {
+      slots.push({
+        time: currentTime.toLocaleTimeString('tr-TR', { hour: '2-digit', minute: '2-digit' }),
+        available: true
+      });
+    }
+    
+    currentTime = new Date(currentTime.getTime() + (30 * 60000));
+  }
+  
+  return {
+    content: [{
+      type: 'text',
+      text: JSON.stringify({
+        date: date,
+        availableSlots: slots,
+        totalSlots: slots.length
+      })
+    }]
+  };
+}
+
+// Start MCP server
+const transport = new StdioTransport();
+server.connect(transport);
+
+console.log('Diş Hekimi MCP Server started successfully!');
