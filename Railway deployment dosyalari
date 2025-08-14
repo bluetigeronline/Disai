@@ -1,0 +1,154 @@
+# Dockerfile
+FROM node:18-alpine
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy source code
+COPY . .
+
+# Expose port
+EXPOSE 3000
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:3000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"
+
+# Start application
+CMD ["npm", "start"]
+
+---
+
+# railway.toml
+[build]
+  builder = "dockerfile"
+
+[deploy]
+  healthcheckPath = "/health"
+  healthcheckTimeout = 300
+  restartPolicyType = "ON_FAILURE"
+  restartPolicyMaxRetries = 10
+
+[[deploy.environmentVariables]]
+  name = "NODE_ENV"
+  value = "production"
+
+---
+
+# .env.example
+# Google API Configuration
+GOOGLE_PROJECT_ID=your-project-id
+GOOGLE_PRIVATE_KEY_ID=your-private-key-id
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\nYour-Private-Key-Here\n-----END PRIVATE KEY-----"
+GOOGLE_CLIENT_EMAIL=your-service-account@project-id.iam.gserviceaccount.com
+GOOGLE_CLIENT_ID=your-client-id
+GOOGLE_CALENDAR_ID=your-calendar-id@gmail.com
+GOOGLE_SHEET_ID=your-sheet-id
+
+# Twilio WhatsApp Configuration
+TWILIO_ACCOUNT_SID=your-twilio-sid
+TWILIO_AUTH_TOKEN=your-twilio-token
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+
+# Server Configuration
+PORT=3000
+NODE_ENV=production
+
+---
+
+# .gitignore
+node_modules/
+.env
+.DS_Store
+*.log
+dist/
+coverage/
+.nyc_output/
+
+---
+
+# README.md
+# Diş Hekimi MCP Server
+
+AI destekli diş hekimi randevu sistemi için MCP (Model Context Protocol) server'ı.
+
+## Özellikler
+
+- ✅ Google Calendar entegrasyonu
+- ✅ Google Sheets kayıt sistemi  
+- ✅ WhatsApp bildirimleri (Twilio)
+- ✅ Müsaitlik kontrolü
+- ✅ Otomatik randevu oluşturma
+- ✅ ElevenLabs uyumluluğu
+
+## Kurulum
+
+### 1. Railway'e Deploy
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/template/your-template)
+
+### 2. Environment Variables
+
+Railway dashboard'da şu environment variables'ları ekleyin:
+
+```
+GOOGLE_PROJECT_ID=your-project-id
+GOOGLE_PRIVATE_KEY_ID=your-private-key-id  
+GOOGLE_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----..."
+GOOGLE_CLIENT_EMAIL=your-service-account@project.iam.gserviceaccount.com
+GOOGLE_CLIENT_ID=your-client-id
+GOOGLE_CALENDAR_ID=primary
+GOOGLE_SHEET_ID=your-sheet-id
+
+TWILIO_ACCOUNT_SID=your-twilio-sid
+TWILIO_AUTH_TOKEN=your-twilio-token
+TWILIO_WHATSAPP_NUMBER=whatsapp:+14155238886
+```
+
+### 3. Google API Setup
+
+1. [Google Cloud Console](https://console.cloud.google.com/)
+2. Enable Calendar API ve Sheets API
+3. Service Account oluşturun
+4. JSON key download edin
+5. Environment variables'a ekleyin
+
+### 4. Twilio Setup
+
+1. [Twilio Console](https://console.twilio.com/)
+2. WhatsApp Sandbox'ı aktifleştirin
+3. Credentials'ı environment variables'a ekleyin
+
+## API Endpoints
+
+### Health Check
+```
+GET /health
+```
+
+### MCP Tools
+
+- `check_calendar_availability` - Takvim müsaitlik kontrolü
+- `create_appointment` - Randevu oluşturma
+- `send_whatsapp_confirmation` - WhatsApp onayı
+- `get_available_slots` - Müsait saatler
+
+## ElevenLabs Entegrasyonu
+
+MCP Server URL'ini ElevenLabs agent'ınıza ekleyin:
+
+```json
+{
+  "mcp_servers": [
+    {
+      "name": "dis-hekimi-randevu",
+      "url": "https://your-railway-app.railway.app"
+    }
+  ]
+}
+```
